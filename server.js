@@ -43,6 +43,18 @@ function configuredOrder(){
   const normalizedPrimary=primary==="openai-compatible"?"compatible":primary;
   return [normalizedPrimary,...normalized].filter((x,i,a)=>providers[x]&&a.indexOf(x)===i&&providers[x].key());
 }
+function manusText(data){
+  if(data?.output_text) return data.output_text;
+  const items=data?.output||data?.messages||[];
+  return (Array.isArray(items)?items:[]).flatMap(item=>{
+    if(typeof item==="string") return [item];
+    if(item?.role&&item.role!=="assistant"&&data?.messages) return [];
+    if(typeof item?.content==="string") return [item.content];
+    if(Array.isArray(item?.content)) return item.content.map(x=>x?.text||x?.value||"");
+    if(typeof item?.text==="string") return [item.text];
+    return [];
+  }).filter(Boolean).join("\n");
+}
 async function callProvider(name, messages){
   const p=providers[name]; const key=p.key();
   if(!key) throw Object.assign(new Error("API key "+name+" belum diatur"),{status:401,provider:name});
@@ -51,7 +63,19 @@ async function callProvider(name, messages){
     const input=messages.filter(m=>m.role!=="system").map(m=>({role:m.role==="assistant"?"assistant":"user",content:[{type:"input_text",text:m.content}]}));
     const r=await fetch(p.base(),{method:"POST",headers:{"content-type":"application/json","API_KEY":key},body:JSON.stringify({model:p.model(),instructions:system,input})});
     const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||data.message||"Manus API error"),{status:r.status,provider:name});
-    const text=data.output_text || (data.output||[]).flatMap(x=>x.content||[]).map(x=>x.text||x.value||"").join("\n");
+    let result=data; let text=manusText(result); const taskId=data.task_id||data.taskId||data.id;
+    if(!text && taskId && ["pending","running","in_progress","queued"].includes(String(data.status||"").toLowerCase())){
+      const taskUrl=p.base().replace(/\/responses\/?$/,"/tasks/")+encodeURIComponent(taskId);
+      const deadline=Date.now()+55000;
+      while(Date.now()<deadline){
+        await new Promise(resolve=>setTimeout(resolve,1500));
+        const poll=await fetch(taskUrl,{headers:{"Accept":"application/json","API_KEY":key}}); result=await poll.json();
+        if(!poll.ok) throw Object.assign(new Error(result.error?.message||result.message||"Manus task retrieval error"),{status:poll.status,provider:name});
+        text=manusText(result); const status=String(result.status||"").toLowerCase();
+        if(text || ["completed","failed","error"].includes(status)) break;
+      }
+    }
+    if(["failed","error"].includes(String(result.status||"").toLowerCase())) throw Object.assign(new Error(result.error?.message||result.error_message||"Manus task gagal"),{status:502,provider:name});
     return {text:text||"Manus tidak mengembalikan jawaban.",provider:name,model:p.model()};
   }
   if(name==="anthropic"){
