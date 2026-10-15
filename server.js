@@ -2,6 +2,10 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
+const fs = require("fs");
+const os = require("os");
+const multer = require("multer");
+const ffmpegPath = require("ffmpeg-static");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
@@ -13,6 +17,10 @@ app.use(express.static(path.join(__dirname, "public")));
 const PORT = Number(process.env.PORT || 3000);
 const APP_PASSWORD = process.env.APP_PASSWORD || "";
 const sessions = new Map();
+const videoJobs = new Map();
+const videoOutputDir = path.join(os.tmpdir(), "devops-video-output");
+fs.mkdirSync(videoOutputDir, {recursive:true});
+const videoUpload = multer({storage:multer.memoryStorage(),limits:{fileSize:200*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^video\//i.test(file.mimetype))});
 
 function auth(req, res, next) {
   if (!APP_PASSWORD) return next();
@@ -157,4 +165,12 @@ app.post("/api/firebase/deploy",auth,async(req,res)=>{
  try{const {stdout,stderr}=await execFileAsync("npx",["--yes","firebase-tools","deploy","--only","hosting","--project",process.env.FIREBASE_PROJECT_ID,"--token",process.env.FIREBASE_TOKEN],{cwd:__dirname,timeout:180000,maxBuffer:1024*1024});res.json({ok:true,stdout,stderr});}
  catch(e){res.status(502).json({error:"Deploy Firebase gagal.",details:(e.stderr||e.message||"").slice(0,3000)});}
 });
+function videoTime(sec){const ms=Math.max(0,Math.round(Number(sec||0)*1000)),h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000),s=Math.floor(ms%60000/1000),z=ms%1000;return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")},${String(z).padStart(3,"0")}`;}
+function srtFromSegments(segments){return segments.map((x,i)=>`${i+1}\n${videoTime(x.start)} --> ${videoTime(Math.max(Number(x.end||0),Number(x.start||0)+1))}\n${String(x.translation||x.text||"").trim()}\n`).join("\n");}
+async function geminiVideoSegments(audioPath){const key=process.env.GEMINI_API_KEY;if(!key)throw Error("GEMINI_API_KEY belum dikonfigurasi untuk transkripsi video.");const audio=fs.readFileSync(audioPath).toString("base64"),model=process.env.GEMINI_MODEL||"gemini-3.8-flash",url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,prompt=`Dengarkan audio video ini. Buat transkripsi narasi dan terjemahkan ke Bahasa Indonesia. Kembalikan JSON valid saja dengan bentuk {"segments":[{"start":0,"end":3,"text":"bahasa asli","translation":"Bahasa Indonesia"}]}. Gunakan detik untuk start dan end, pecah menjadi segmen pendek yang mengikuti waktu ucapan, jangan menambahkan penjelasan lain.`;const r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt},{inlineData:{mimeType:"audio/mpeg",data:audio}}]}],generationConfig:{responseMimeType:"application/json",temperature:0.1}})});const d=await r.json();if(!r.ok)throw Error(d.error?.message||`Gemini video HTTP ${r.status}`);const text=(d.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("").replace(/^```json\s*|\s*```$/g,"").trim();const parsed=JSON.parse(text);if(!Array.isArray(parsed.segments)||!parsed.segments.length)throw Error("Narasi tidak terdeteksi di video.");return parsed.segments;}
+async function processVideoJob(jobId,inputPath){const work=path.join(os.tmpdir(),`devops-video-${jobId}`);fs.mkdirSync(work,{recursive:true});const audioPath=path.join(work,"audio.mp3"),srtPath=path.join(work,"translated-id.srt"),outputPath=path.join(videoOutputDir,`${jobId}-id-subtitle.mp4`);try{videoJobs.get(jobId).status="extracting";await execFileAsync(ffmpegPath,["-y","-i",inputPath,"-vn","-ac","1","-ar","16000","-b:a","64k",audioPath],{timeout:300000});videoJobs.get(jobId).status="translating";const segments=await geminiVideoSegments(audioPath);fs.writeFileSync(srtPath,srtFromSegments(segments));videoJobs.get(jobId).status="rendering";await execFileAsync(ffmpegPath,["-y","-i",inputPath,"-vf",`subtitles=${srtPath}:force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=28'`,"-c:a","copy","-c:v","libx264","-preset","veryfast","-crf","23",outputPath],{timeout:900000});videoJobs.get(jobId).status="completed";videoJobs.get(jobId).result={video:`/api/video/jobs/${jobId}/download`,srt:`/api/video/jobs/${jobId}/srt`,segments:segments.length};}catch(e){videoJobs.get(jobId).status="failed";videoJobs.get(jobId).error=(e.stderr||e.message||"Pemrosesan video gagal").slice(-2000);}finally{try{fs.rmSync(inputPath,{force:true});fs.rmSync(work,{recursive:true,force:true});}catch{}}}
+app.post("/api/video/jobs",auth,(req,res)=>videoUpload.single("video")(req,res,async err=>{if(err)return res.status(400).json({error:err.message});if(!req.file)return res.status(400).json({error:"Unggah file video terlebih dahulu."});const id=crypto.randomBytes(8).toString("hex"),inputPath=path.join(os.tmpdir(),`devops-upload-${id}-${path.extname(req.file.originalname)||".mp4"}`);fs.writeFileSync(inputPath,req.file.buffer);videoJobs.set(id,{status:"queued",createdAt:Date.now(),name:req.file.originalname});res.status(202).json({jobId:id,status:"queued",message:"Video diterima dan sedang diproses."});processVideoJob(id,inputPath); }));
+app.get("/api/video/jobs/:id",auth,(req,res)=>{const job=videoJobs.get(req.params.id);if(!job)return res.status(404).json({error:"Job video tidak ditemukan atau sudah kedaluwarsa."});res.json({jobId:req.params.id,...job});});
+app.get("/api/video/jobs/:id/download",auth,(req,res)=>{const file=path.join(videoOutputDir,`${req.params.id}-id-subtitle.mp4`);if(!fs.existsSync(file))return res.status(404).json({error:"Video belum selesai."});res.download(file,"video-terjemahan-indonesia.mp4");});
+app.get("/api/video/jobs/:id/srt",auth,(req,res)=>{const file=path.join(os.tmpdir(),`devops-video-${req.params.id}`,"translated-id.srt");if(!fs.existsSync(file))return res.status(404).json({error:"Subtitle belum tersedia."});res.download(file,"subtitle-indonesia.srt");});
 app.listen(PORT,()=>console.log(`DevOps AI berjalan di port ${PORT}`));
