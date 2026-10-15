@@ -32,7 +32,7 @@ app.use("/api", (req,res,next)=>{ if(req.path==="/login"||req.path==="/health") 
 const providers = {
   openai: { key:()=>process.env.OPENAI_API_KEY || (process.env.AI_PROVIDER==="openai"?process.env.AI_API_KEY:""), model:()=>process.env.OPENAI_MODEL || process.env.AI_MODEL || "gpt-4o-mini", base:()=>"https://api.openai.com/v1/chat/completions" },
   anthropic: { key:()=>process.env.ANTHROPIC_API_KEY || (process.env.AI_PROVIDER==="anthropic"?process.env.AI_API_KEY:""), model:()=>process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest" },
-  gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-2.0-flash" },
+  gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-3.8-flash" },
   compatible: { key:()=>process.env.COMPAT_API_KEY || (process.env.AI_PROVIDER==="openai-compatible"?process.env.AI_API_KEY:""), model:()=>process.env.COMPAT_MODEL || process.env.AI_MODEL || "default", base:()=>process.env.COMPAT_BASE_URL || process.env.AI_BASE_URL },
   manus: { key:()=>process.env.MANUS_API_KEY || (process.env.AI_PROVIDER==="manus"?process.env.AI_API_KEY:""), model:()=>process.env.MANUS_MODEL || process.env.AI_MODEL || "manus-1.6-lite", base:()=>process.env.MANUS_BASE_URL || "https://api.manus.ai/v2" }
 };
@@ -61,8 +61,9 @@ async function callProvider(name, messages){
   const system="Kamu adalah DevOps AI yang membantu mengelola GitHub, Render, dan Firebase. Jawab dalam bahasa Indonesia. Jangan mengaku telah melakukan tindakan eksternal jika belum dilakukan melalui tool resmi. Jangan meminta pengguna membagikan secret/API key di chat. Jelaskan bahwa tindakan berisiko memerlukan konfirmasi.";
   if(name==="manus"){
     const prompt=[system,...messages.filter(m=>m.role!=="system").map(m=>`${m.role}: ${m.content}`)].join("\n\n");
-    const r=await fetch(p.base().replace(/\/$/,"")+"/task.create",{method:"POST",headers:{"content-type":"application/json","x-manus-api-key":key},body:JSON.stringify({message:{content:[{type:"text",text:prompt}]},agent_profile:p.model()})});
-    const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||data.message||"Manus API error"),{status:r.status,provider:name});
+    const profile=p.model().includes("max")?"max":p.model().includes("lite")?"lite":"standard";
+    const r=await fetch(p.base().replace(/\/$/,"")+"/task.create",{method:"POST",headers:{"content-type":"application/json","x-manus-api-key":key},body:JSON.stringify({message:{content:[{type:"text",text:prompt}]},agent_profile:profile})});
+    const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||data.error?.code||data.message||`Manus API HTTP ${r.status}`),{status:r.status,provider:name});
     let result=data; let text=manusText(result); const taskId=data.task_id||data.taskId||data.task?.id;
     if(!text && taskId){
       const taskUrl=p.base().replace(/\/$/,"")+"/task.listMessages?task_id="+encodeURIComponent(taskId)+"&order=desc&limit=20";
@@ -70,7 +71,7 @@ async function callProvider(name, messages){
       while(Date.now()<deadline){
         await new Promise(resolve=>setTimeout(resolve,1500));
         const poll=await fetch(taskUrl,{headers:{"Accept":"application/json","x-manus-api-key":key}}); result=await poll.json();
-        if(!poll.ok) throw Object.assign(new Error(result.error?.message||result.message||"Manus task retrieval error"),{status:poll.status,provider:name});
+        if(!poll.ok) throw Object.assign(new Error(result.error?.message||result.error?.code||result.message||`Manus task retrieval HTTP ${poll.status}`),{status:poll.status,provider:name});
         const assistantMessages=(result.messages||[]).filter(x=>x?.type==="assistant_message"&&x.assistant_message?.content).map(x=>x.assistant_message.content);
         text=assistantMessages.join("\n"); const statusUpdates=(result.messages||[]).filter(x=>x?.type==="status_update").map(x=>x.status_update?.agent_status); const status=String(statusUpdates[0]||"").toLowerCase();
         if(text || ["completed","failed","error"].includes(status)) break;
