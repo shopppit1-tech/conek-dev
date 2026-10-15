@@ -3,7 +3,7 @@
 A simple Indonesian chat UI with a Node.js backend and integrations for AI providers, GitHub, Render, and Firebase Hosting CLI.
 
 ## Important: setup is required
-This ZIP is a runnable starter, not a pre-connected account. You must add your own API credentials and choose the providers/services you want enabled. Manus access requires a supported Manus API endpoint/key; this app supports OpenAI-compatible endpoints through `AI_BASE_URL`, but do not assume every Manus plan provides API access.
+This ZIP is a runnable starter, not a pre-connected account. You must add your own API credentials and choose the providers/services you want enabled. Manus is supported through its Responses API. Keep `MANUS_API_KEY` only in Render Environment Variables; never commit it to GitHub or place it in chat.
 
 ## Run locally
 1. Install Node.js 20+.
@@ -14,15 +14,18 @@ This ZIP is a runnable starter, not a pre-connected account. You must add your o
 6. Open `http://localhost:3000`
 
 ## AI provider setup
-- `AI_PROVIDER`: `openai`, `anthropic`, `gemini`, or `openai-compatible`
+- `AI_PROVIDER`: `manus`, `openai`, `anthropic`, `gemini`, or `openai-compatible`
 - `AI_API_KEY`: key for the selected provider
 - `AI_MODEL`: model name supported by that provider
 - `AI_BASE_URL`: required for `openai-compatible`, set to the provider's documented API base URL.
+- `MANUS_API_KEY`: Manus API key, configured only as a secret in Render.
+- `MANUS_MODEL`: Manus model such as `manus-1.6-lite`, `manus-1.6`, or `manus-1.6-max`.
+- `MANUS_BASE_URL`: defaults to `https://api.manus.ai/v1/responses`.
 - `AI_FALLBACK_ORDER`: provider order to try when a provider reports quota/rate-limit or server errors. Add a separate key for each provider using `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and optional `COMPAT_API_KEY` / `COMPAT_BASE_URL`.
 - Fallback is only possible when credentials are configured and the provider has a compatible API. It cannot detect an account's exact remaining credit unless the provider exposes that information. Displayed quota is therefore "unknown" unless provider response indicates a quota/rate-limit error.
 
 Supported environment keys:
-`OPENAI_API_KEY`, `OPENAI_MODEL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `COMPAT_API_KEY`, `COMPAT_MODEL`, `COMPAT_BASE_URL`.
+`OPENAI_API_KEY`, `OPENAI_MODEL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `COMPAT_API_KEY`, `COMPAT_MODEL`, `COMPAT_BASE_URL`, `MANUS_API_KEY`, `MANUS_MODEL`, `MANUS_BASE_URL`.
 
 ## GitHub
 Set `GITHUB_TOKEN`. Optionally set `GITHUB_OWNER` and `GITHUB_REPO` to check a specific repository. Use a fine-grained token with minimum required permissions. Chat actions that write files/commit/push are not enabled by default; the assistant can inspect status and guide you. Do not expose tokens in chat.

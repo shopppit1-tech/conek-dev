@@ -33,18 +33,27 @@ const providers = {
   openai: { key:()=>process.env.OPENAI_API_KEY || (process.env.AI_PROVIDER==="openai"?process.env.AI_API_KEY:""), model:()=>process.env.OPENAI_MODEL || process.env.AI_MODEL || "gpt-4o-mini", base:()=>"https://api.openai.com/v1/chat/completions" },
   anthropic: { key:()=>process.env.ANTHROPIC_API_KEY || (process.env.AI_PROVIDER==="anthropic"?process.env.AI_API_KEY:""), model:()=>process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest" },
   gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-2.0-flash" },
-  compatible: { key:()=>process.env.COMPAT_API_KEY || (process.env.AI_PROVIDER==="openai-compatible"?process.env.AI_API_KEY:""), model:()=>process.env.COMPAT_MODEL || process.env.AI_MODEL || "default", base:()=>process.env.COMPAT_BASE_URL || process.env.AI_BASE_URL }
+  compatible: { key:()=>process.env.COMPAT_API_KEY || (process.env.AI_PROVIDER==="openai-compatible"?process.env.AI_API_KEY:""), model:()=>process.env.COMPAT_MODEL || process.env.AI_MODEL || "default", base:()=>process.env.COMPAT_BASE_URL || process.env.AI_BASE_URL },
+  manus: { key:()=>process.env.MANUS_API_KEY || (process.env.AI_PROVIDER==="manus"?process.env.AI_API_KEY:""), model:()=>process.env.MANUS_MODEL || process.env.AI_MODEL || "manus-1.6-lite", base:()=>process.env.MANUS_BASE_URL || "https://api.manus.ai/v1/responses" }
 };
 function configuredOrder(){
   const primary=(process.env.AI_PROVIDER||"openai").toLowerCase();
   const raw=(process.env.AI_FALLBACK_ORDER||"openai,anthropic,gemini").split(",").map(x=>x.trim().toLowerCase()).filter(Boolean);
   const normalized=raw.map(x=>x==="openai-compatible"?"compatible":x);
-  return [primary==="openai-compatible"?"compatible":primary,...normalized].filter((x,i,a)=>providers[x]&&a.indexOf(x)===i&&providers[x].key());
+  const normalizedPrimary=primary==="openai-compatible"?"compatible":primary;
+  return [normalizedPrimary,...normalized].filter((x,i,a)=>providers[x]&&a.indexOf(x)===i&&providers[x].key());
 }
 async function callProvider(name, messages){
   const p=providers[name]; const key=p.key();
   if(!key) throw Object.assign(new Error("API key "+name+" belum diatur"),{status:401,provider:name});
   const system="Kamu adalah DevOps AI yang membantu mengelola GitHub, Render, dan Firebase. Jawab dalam bahasa Indonesia. Jangan mengaku telah melakukan tindakan eksternal jika belum dilakukan melalui tool resmi. Jangan meminta pengguna membagikan secret/API key di chat. Jelaskan bahwa tindakan berisiko memerlukan konfirmasi.";
+  if(name==="manus"){
+    const input=messages.filter(m=>m.role!=="system").map(m=>({role:m.role==="assistant"?"assistant":"user",content:[{type:"input_text",text:m.content}]}));
+    const r=await fetch(p.base(),{method:"POST",headers:{"content-type":"application/json","API_KEY":key},body:JSON.stringify({model:p.model(),instructions:system,input})});
+    const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||data.message||"Manus API error"),{status:r.status,provider:name});
+    const text=data.output_text || (data.output||[]).flatMap(x=>x.content||[]).map(x=>x.text||x.value||"").join("\n");
+    return {text:text||"Manus tidak mengembalikan jawaban.",provider:name,model:p.model()};
+  }
   if(name==="anthropic"){
     const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:p.model(),max_tokens:1200,system,messages:messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}))})});
     const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||"Anthropic API error"),{status:r.status,provider:name});
@@ -66,7 +75,7 @@ async function callProvider(name, messages){
 }
 app.get("/api/providers",auth,(req,res)=>{
  const order=configuredOrder();
- res.json({primary:process.env.AI_PROVIDER||"openai",providers:Object.keys(providers).map(name=>({id:name,label:({openai:"OpenAI",anthropic:"Anthropic Claude",gemini:"Google Gemini",compatible:"API kompatibel / Manus jika mendukung"}[name]),configured:!!providers[name].key(),model:providers[name].model(),active:order[0]===name,quota:"Tidak tersedia dari API"})),fallbackOrder:order});
+ res.json({primary:process.env.AI_PROVIDER||"openai",providers:Object.keys(providers).map(name=>({id:name,label:({openai:"OpenAI",anthropic:"Anthropic Claude",gemini:"Google Gemini",compatible:"API kompatibel",manus:"Manus AI"}[name]),configured:!!providers[name].key(),model:providers[name].model(),active:order[0]===name,quota:"Tidak tersedia dari API"})),fallbackOrder:order});
 });
 app.post("/api/chat",auth,async(req,res)=>{
  const messages=Array.isArray(req.body?.messages)?req.body.messages.slice(-16):[];
@@ -75,7 +84,7 @@ app.post("/api/chat",auth,async(req,res)=>{
  if(!order.length) return res.status(503).json({error:"Belum ada API AI yang dikonfigurasi. Isi .env dan restart server."});
  const failures=[];
  for(const name of order){
-  try { const out=await callProvider(name,messages); return res.json({...out,fallbackUsed:name!==(process.env.AI_PROVIDER==="openai-compatible"?"compatible":process.env.AI_PROVIDER||"openai"),attempted:failures.map(x=>x.provider)}); }
+  try { const out=await callProvider(name,messages); const primary=(process.env.AI_PROVIDER==="openai-compatible"?"compatible":process.env.AI_PROVIDER||"openai"); return res.json({...out,fallbackUsed:name!==primary,attempted:failures.map(x=>x.provider)}); }
   catch(e){ failures.push({provider:name,message:e.message,status:e.status||0}); if(![401,403,404,408,413,429,500,502,503,504,400].includes(e.status)) break; }
  }
  res.status(502).json({error:"Semua provider AI yang dikonfigurasi gagal.",details:failures});

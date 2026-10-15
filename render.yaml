@@ -12,6 +12,8 @@ services:
       - key: SESSION_SECRET
         generateValue: true
       - key: AI_PROVIDER
-        value: openai
+        value: manus
       - key: AI_MODEL
-        value: gpt-4o-mini
+        value: manus-1.6-lite
+      - key: MANUS_BASE_URL
+        value: https://api.manus.ai/v1/responses
