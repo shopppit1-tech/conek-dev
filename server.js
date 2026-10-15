@@ -34,7 +34,7 @@ const providers = {
   anthropic: { key:()=>process.env.ANTHROPIC_API_KEY || (process.env.AI_PROVIDER==="anthropic"?process.env.AI_API_KEY:""), model:()=>process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest" },
   gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-2.0-flash" },
   compatible: { key:()=>process.env.COMPAT_API_KEY || (process.env.AI_PROVIDER==="openai-compatible"?process.env.AI_API_KEY:""), model:()=>process.env.COMPAT_MODEL || process.env.AI_MODEL || "default", base:()=>process.env.COMPAT_BASE_URL || process.env.AI_BASE_URL },
-  manus: { key:()=>process.env.MANUS_API_KEY || (process.env.AI_PROVIDER==="manus"?process.env.AI_API_KEY:""), model:()=>process.env.MANUS_MODEL || process.env.AI_MODEL || "manus-1.6-lite", base:()=>process.env.MANUS_BASE_URL || "https://api.manus.ai/v1/responses" }
+  manus: { key:()=>process.env.MANUS_API_KEY || (process.env.AI_PROVIDER==="manus"?process.env.AI_API_KEY:""), model:()=>process.env.MANUS_MODEL || process.env.AI_MODEL || "manus-1.6-lite", base:()=>process.env.MANUS_BASE_URL || "https://api.manus.ai/v2" }
 };
 function configuredOrder(){
   const primary=(process.env.AI_PROVIDER||"openai").toLowerCase();
@@ -60,22 +60,23 @@ async function callProvider(name, messages){
   if(!key) throw Object.assign(new Error("API key "+name+" belum diatur"),{status:401,provider:name});
   const system="Kamu adalah DevOps AI yang membantu mengelola GitHub, Render, dan Firebase. Jawab dalam bahasa Indonesia. Jangan mengaku telah melakukan tindakan eksternal jika belum dilakukan melalui tool resmi. Jangan meminta pengguna membagikan secret/API key di chat. Jelaskan bahwa tindakan berisiko memerlukan konfirmasi.";
   if(name==="manus"){
-    const input=messages.filter(m=>m.role!=="system").map(m=>({role:m.role==="assistant"?"assistant":"user",content:[{type:"input_text",text:m.content}]}));
-    const r=await fetch(p.base(),{method:"POST",headers:{"content-type":"application/json","API_KEY":key},body:JSON.stringify({model:p.model(),instructions:system,input})});
+    const prompt=[system,...messages.filter(m=>m.role!=="system").map(m=>`${m.role}: ${m.content}`)].join("\n\n");
+    const r=await fetch(p.base().replace(/\/$/,"")+"/task.create",{method:"POST",headers:{"content-type":"application/json","x-manus-api-key":key},body:JSON.stringify({message:{content:[{type:"text",text:prompt}]},agent_profile:p.model()})});
     const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||data.message||"Manus API error"),{status:r.status,provider:name});
-    let result=data; let text=manusText(result); const taskId=data.task_id||data.taskId||data.id;
-    if(!text && taskId && ["pending","running","in_progress","queued"].includes(String(data.status||"").toLowerCase())){
-      const taskUrl=p.base().replace(/\/responses\/?$/,"/tasks/")+encodeURIComponent(taskId);
+    let result=data; let text=manusText(result); const taskId=data.task_id||data.taskId||data.task?.id;
+    if(!text && taskId){
+      const taskUrl=p.base().replace(/\/$/,"")+"/task.listMessages?task_id="+encodeURIComponent(taskId)+"&order=desc&limit=20";
       const deadline=Date.now()+55000;
       while(Date.now()<deadline){
         await new Promise(resolve=>setTimeout(resolve,1500));
-        const poll=await fetch(taskUrl,{headers:{"Accept":"application/json","API_KEY":key}}); result=await poll.json();
+        const poll=await fetch(taskUrl,{headers:{"Accept":"application/json","x-manus-api-key":key}}); result=await poll.json();
         if(!poll.ok) throw Object.assign(new Error(result.error?.message||result.message||"Manus task retrieval error"),{status:poll.status,provider:name});
-        text=manusText(result); const status=String(result.status||"").toLowerCase();
+        const assistantMessages=(result.messages||[]).filter(x=>x?.type==="assistant_message"&&x.assistant_message?.content).map(x=>x.assistant_message.content);
+        text=assistantMessages.join("\n"); const statusUpdates=(result.messages||[]).filter(x=>x?.type==="status_update").map(x=>x.status_update?.agent_status); const status=String(statusUpdates[0]||"").toLowerCase();
         if(text || ["completed","failed","error"].includes(status)) break;
       }
     }
-    if(["failed","error"].includes(String(result.status||"").toLowerCase())) throw Object.assign(new Error(result.error?.message||result.error_message||"Manus task gagal"),{status:502,provider:name});
+    if(result.ok===false) throw Object.assign(new Error(result.error?.message||"Manus task gagal"),{status:502,provider:name});
     if(!text) throw Object.assign(new Error("Manus task belum selesai atau tidak mengembalikan output"),{status:504,provider:name});
     return {text,provider:name,model:p.model()};
   }

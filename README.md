@@ -20,7 +20,7 @@ This ZIP is a runnable starter, not a pre-connected account. You must add your o
 - `AI_BASE_URL`: required for `openai-compatible`, set to the provider's documented API base URL.
 - `MANUS_API_KEY`: Manus API key, configured only as a secret in Render.
 - `MANUS_MODEL`: Manus model such as `manus-1.6-lite`, `manus-1.6`, or `manus-1.6-max`.
-- `MANUS_BASE_URL`: defaults to `https://api.manus.ai/v1/responses`.
+- `MANUS_BASE_URL`: defaults to `https://api.manus.ai/v2` and uses the `x-manus-api-key` header.
 - `GEMINI_API_KEY`: Gemini API key, configured only as a secret in Render.
 - `GEMINI_MODEL`: fallback model, default `gemini-2.0-flash`.
 - `AI_FALLBACK_ORDER`: provider order to try when a provider reports quota/rate-limit or server errors. Add a separate key for each provider using `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and optional `COMPAT_API_KEY` / `COMPAT_BASE_URL`.
