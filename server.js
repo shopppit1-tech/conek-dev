@@ -48,7 +48,7 @@ function manusText(data){
   const items=data?.output||data?.messages||[];
   return (Array.isArray(items)?items:[]).flatMap(item=>{
     if(typeof item==="string") return [item];
-    if(item?.role&&item.role!=="assistant"&&data?.messages) return [];
+    if(data?.messages&&item?.role!=="assistant") return [];
     if(typeof item?.content==="string") return [item.content];
     if(Array.isArray(item?.content)) return item.content.map(x=>x?.text||x?.value||"");
     if(typeof item?.text==="string") return [item.text];
@@ -76,7 +76,8 @@ async function callProvider(name, messages){
       }
     }
     if(["failed","error"].includes(String(result.status||"").toLowerCase())) throw Object.assign(new Error(result.error?.message||result.error_message||"Manus task gagal"),{status:502,provider:name});
-    return {text:text||"Manus tidak mengembalikan jawaban.",provider:name,model:p.model()};
+    if(!text) throw Object.assign(new Error("Manus task belum selesai atau tidak mengembalikan output"),{status:504,provider:name});
+    return {text,provider:name,model:p.model()};
   }
   if(name==="anthropic"){
     const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:p.model(),max_tokens:1200,system,messages:messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}))})});
