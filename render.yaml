@@ -17,3 +17,7 @@ services:
         value: manus-1.6-lite
       - key: MANUS_BASE_URL
         value: https://api.manus.ai/v1/responses
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: AI_FALLBACK_ORDER
+        value: manus,gemini
