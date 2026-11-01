@@ -1,0 +1,48 @@
+name: Upload Video YouTube Harian
+
+on:
+  schedule:
+    # 01:00 UTC = 08:00 WIB setiap hari
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      videos_per_run:
+        description: 'Jumlah video yang di-upload pada run ini'
+        required: false
+        default: '1'
+        type: string
+
+concurrency:
+  group: youtube-daily-upload
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_BUCKET: video-jobs
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      VIDEOS_PER_RUN: ${{ inputs.videos_per_run || '1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Upload ready video to YouTube
+        run: node scripts/youtube-daily-upload.js
