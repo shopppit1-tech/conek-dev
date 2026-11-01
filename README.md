@@ -38,6 +38,11 @@ Set `RENDER_API_KEY`. This enables listing services and deployment triggers thro
 ## Firebase Hosting
 Set `FIREBASE_TOKEN` and `FIREBASE_PROJECT_ID` to enable deployment through Firebase CLI. Install Firebase CLI in the environment (`npm install -g firebase-tools`) if using the optional deploy endpoint. On Render, a Firebase CLI token can expire; use a CI service account or dedicated deployment pipeline for production. Do not upload service account JSON to a public repository.
 
+## Login email (Supabase Auth)
+The Video Translate AI interface uses Supabase email/password sign-in and signup. Set `SUPABASE_URL`, `SUPABASE_ANON_KEY` (the public anon/publishable key), and `APP_URL` in the server environment; for Render, use the service's Environment settings. The app validates every protected API request with Supabase Auth. If these values are missing and no `APP_PASSWORD` fallback is configured, API requests fail closed.
+
+The public anon/publishable key is intended for Auth/client use. Never expose `SUPABASE_SERVICE_ROLE_KEY` in HTML, JavaScript, a mobile app, or a public repository; keep it server-only. Hosted Supabase email/password Auth is enabled by default, and email confirmation may be required by the project. Set the Supabase Auth Site URL and allow-list the production URL `https://conek-dev.onrender.com/` so confirmation links return to the app. Signup then asks the user to confirm their email before signing in when confirmation is enabled.
+
 ## Security
 - Keep `.env` out of Git.
 - Use HTTPS and a strong `SESSION_SECRET` in production.

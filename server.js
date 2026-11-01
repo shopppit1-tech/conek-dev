@@ -15,8 +15,7 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 const PORT = Number(process.env.PORT || 3000);
-const APP_PASSWORD = process.env.APP_PASSWORD || "";
-const sessions = new Map();
+const { auth, login, signup, refresh, logout, currentUser, authSettings } = require("./auth");
 const videoJobs = new Map();
 const videoOutputDir = path.join(os.tmpdir(), "devops-video-output");
 fs.mkdirSync(videoOutputDir, {recursive:true});
@@ -43,20 +42,22 @@ const videoUpload = multer({
   fileFilter: (req, file, cb) => cb(null, /^video\//i.test(file.mimetype))
 });
 
-function auth(req, res, next) {
-  if (!APP_PASSWORD) return next();
-  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-  if (token && sessions.has(token)) return next();
-  return res.status(401).json({ error: "Login diperlukan." });
-}
-app.post("/api/login", (req,res) => {
-  if (!APP_PASSWORD) return res.json({ ok:true, token:"local-no-auth" });
-  if (!req.body || req.body.password !== APP_PASSWORD) return res.status(401).json({error:"Kata sandi salah."});
-  const token=crypto.randomBytes(32).toString("hex"); sessions.set(token, Date.now());
-  res.json({ok:true,token});
+app.get("/api/auth/config", (req, res) => res.json(authSettings()));
+app.post("/api/login", login);
+app.post("/api/auth/signup", signup);
+app.post("/api/auth/refresh", refresh);
+app.post("/api/logout", logout);
+app.get("/api/auth/me", async (req, res) => {
+  const user = await currentUser(req);
+  if (!user) return res.status(401).json({ error: "Sesi tidak valid atau sudah berakhir." });
+  return res.json({ ok: true, user });
 });
-app.get("/api/health",(req,res)=>res.json({ok:true,app:"DevOps AI",time:new Date().toISOString(),authEnabled:!!APP_PASSWORD}));
-app.use("/api", (req,res,next)=>{ if(req.path==="/login"||req.path==="/health") return next(); auth(req,res,next); });
+app.get("/api/health", (req, res) => res.json({ ok: true, app: "Video Translate AI", time: new Date().toISOString(), authEnabled: authSettings().emailEnabled || authSettings().appPasswordEnabled }));
+app.use("/api", (req, res, next) => {
+  const publicPaths = new Set(["/login", "/auth/config", "/auth/signup", "/auth/refresh", "/auth/me", "/logout", "/health"]);
+  if (publicPaths.has(req.path)) return next();
+  return auth(req, res, next);
+});
 
 const providers = {
   openai: { key:()=>process.env.OPENAI_API_KEY || (process.env.AI_PROVIDER==="openai"?process.env.AI_API_KEY:""), model:()=>process.env.OPENAI_MODEL || process.env.AI_MODEL || "gpt-4o-mini", base:()=>"https://api.openai.com/v1/chat/completions" },
