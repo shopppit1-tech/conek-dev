@@ -1,197 +1,155 @@
-const $ = (s) => document.querySelector(s);
-let file = null, job = null, timer = null;
-const rawFetch = window.fetch.bind(window);
-const SESSION_KEY = "conek_supabase_session";
-let authConfig = { emailEnabled: false, appPasswordEnabled: false };
+const $ = (selector) => document.querySelector(selector);
+const cfg = window.SUPABASE_CONFIG;
+const supabaseClient = window.supabase?.createClient(cfg?.url || "", cfg?.key || "");
+let currentUser = null;
+let selectedFile = null;
+let activeJobId = null;
+let pollTimer = null;
+let elapsedTimer = null;
+let startedAt = 0;
 let signupMode = false;
 
-function readSession() {
-  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null"); } catch { return null; }
+function show(selector, visible = true) { $(selector)?.classList.toggle("hidden", !visible); }
+function setAuthMessage(message = "", error = false) {
+  const el = $("#authMessage");
+  el.textContent = message;
+  el.classList.toggle("is-error", error);
 }
-function saveSession(session) {
-  if (session?.access_token) sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+function setStatus(title, text) {
+  $("#statusTitle").textContent = title;
+  $("#statusText").textContent = text;
 }
-function clearSession() { sessionStorage.removeItem(SESSION_KEY); }
-function show(id, on = true) { $(id).classList.toggle("hidden", !on); }
-function setStatus(title, text) { $("#statusTitle").textContent = title; $("#statusText").textContent = text; }
-function setAuthMessage(message, error = false) {
-  const node = $("#authMessage");
-  node.textContent = message || "";
-  node.classList.toggle("is-error", error);
-}
-function showApp() { show("#authScreen", false); show("#appContent", true); }
-function showLogin(message = "") { show("#appContent", false); show("#authScreen", true); setAuthMessage(message); }
 function setAuthMode(signup) {
   signupMode = signup;
   $("#authTitle").textContent = signup ? "Buat akun" : "Masuk dengan email";
   $("#authIntro").textContent = signup ? "Daftar menggunakan email dan kata sandi." : "Masuk untuk melanjutkan ke aplikasi.";
   $("#authSubmit").textContent = signup ? "Daftar" : "Masuk";
   $("#authPassword").setAttribute("autocomplete", signup ? "new-password" : "current-password");
-  $("#authPassword").minLength = authConfig.emailEnabled && signup ? 8 : 1;
+  $("#authPassword").minLength = signup ? 8 : 1;
   $("#authToggle").textContent = signup ? "Sudah punya akun? Masuk" : "Belum punya akun? Buat akun";
   setAuthMessage("");
 }
+function showApp() { show("#authScreen", false); show("#appContent", true); }
+function showLogin(message = "") { show("#appContent", false); show("#authScreen", true); setAuthMessage(message); }
 
-async function apiFetch(input, init = {}, retried = false) {
-  const url = input instanceof Request ? input.url : String(input);
-  const path = new URL(url, location.href).pathname;
-  if (!path.startsWith("/api/") || /^\/api\/(login|logout|health|auth\/(config|signup|refresh|me))$/.test(path)) {
-    return rawFetch(input, init);
-  }
-  const session = readSession();
-  const headers = new Headers(input instanceof Request ? input.headers : undefined);
-  new Headers(init.headers || {}).forEach((value, key) => headers.set(key, value));
-  if (session?.access_token) headers.set("Authorization", `Bearer ${session.access_token}`);
-  const response = await rawFetch(input, { ...init, headers });
-  if (response.status !== 401 || retried || !session?.refresh_token || !authConfig.emailEnabled) return response;
-  try {
-    const refreshed = await rawFetch("/api/auth/refresh", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: session.refresh_token })
-    });
-    if (!refreshed.ok) throw new Error("refresh failed");
-    const data = await refreshed.json();
-    saveSession(data.session);
-    return apiFetch(input, init, true);
-  } catch {
-    clearSession();
-    showLogin("Sesi berakhir. Silakan masuk kembali.");
-    return response;
-  }
-}
-window.fetch = (input, init) => apiFetch(input, init || {});
-
-function takeConfirmationSessionFromUrl() {
-  if (!location.hash || !location.hash.includes("access_token=")) return;
-  const params = new URLSearchParams(location.hash.slice(1));
-  const accessToken = params.get("access_token");
-  if (!accessToken) return;
-  saveSession({
-    access_token: accessToken,
-    refresh_token: params.get("refresh_token"),
-    expires_at: params.get("expires_at") || null,
-    token_type: params.get("token_type") || "bearer"
+if (!supabaseClient) {
+  showLogin("Konfigurasi Supabase belum dimuat. Muat ulang halaman atau hubungi pengelola.");
+} else {
+  setAuthMode(false);
+  supabaseClient.auth.getSession().then(({ data, error }) => {
+    if (error) return showLogin(error.message);
+    currentUser = data.session?.user || null;
+    currentUser ? showApp() : showLogin();
   });
-  history.replaceState(null, "", location.pathname + location.search);
-}
-
-async function initAuth() {
-  takeConfirmationSessionFromUrl();
-  try {
-    const configResponse = await rawFetch("/api/auth/config");
-    authConfig = configResponse.ok ? await configResponse.json() : authConfig;
-  } catch {}
-  if (authConfig.emailEnabled) {
-    $("#authEmailWrap").classList.remove("hidden");
-    $("#authToggle").classList.remove("hidden");
-    setAuthMode(false);
-    const session = readSession();
-    if (session?.access_token) {
-      try {
-        const response = await rawFetch("/api/auth/me", { headers: { Authorization: `Bearer ${session.access_token}` } });
-        if (response.ok) return showApp();
-      } catch {}
-      clearSession();
-    }
-    showLogin();
-    return;
-  }
-  if (authConfig.appPasswordEnabled) {
-    $("#authEmailWrap").classList.add("hidden");
-    $("#authToggle").classList.add("hidden");
-    $("#authTitle").textContent = "Masuk";
-    $("#authIntro").textContent = "Masukkan kata sandi aplikasi.";
-    $("#authPassword").minLength = 1;
-    showLogin();
-    return;
-  }
-  $("#authEmailWrap").classList.add("hidden");
-  $("#authToggle").classList.add("hidden");
-  showLogin("Login belum dikonfigurasi di server. API aplikasi tetap terkunci sampai autentikasi diaktifkan.");
+  supabaseClient.auth.onAuthStateChange((_event, session) => {
+    currentUser = session?.user || null;
+    currentUser ? showApp() : showLogin();
+  });
 }
 
 $("#authToggle").addEventListener("click", () => setAuthMode(!signupMode));
 $("#authForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!supabaseClient) return;
   const email = $("#authEmail").value.trim();
   const password = $("#authPassword").value;
-  const endpoint = authConfig.emailEnabled ? (signupMode ? "/api/auth/signup" : "/api/login") : "/api/login";
-  const body = authConfig.emailEnabled ? { email, password } : { password };
-  $("#authSubmit").disabled = true;
+  const submit = $("#authSubmit");
+  submit.disabled = true;
   setAuthMessage(signupMode ? "Membuat akun…" : "Memeriksa login…");
   try {
-    const response = await rawFetch(endpoint, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Permintaan login gagal.");
-    if (data.requiresEmailConfirmation) {
-      setAuthMode(false);
-      $("#authEmail").value = email;
-      setAuthMessage(data.message || "Periksa email untuk mengonfirmasi akun.");
-      return;
+    if (signupMode) {
+      const { data, error } = await supabaseClient.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: new URL("./", location.href).href }
+      });
+      if (error) throw error;
+      if (data.session) {
+        currentUser = data.session.user;
+        showApp();
+      } else {
+        setAuthMode(false);
+        $("#authEmail").value = email;
+        setAuthMessage("Pendaftaran diterima. Periksa email untuk konfirmasi, lalu masuk.");
+      }
+    } else {
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      currentUser = data.user;
+      showApp();
     }
-    if (data.session?.access_token) saveSession(data.session);
-    showApp();
   } catch (error) {
     setAuthMessage(error.message || "Login gagal. Coba lagi.", true);
   } finally {
-    $("#authSubmit").disabled = false;
+    submit.disabled = false;
   }
 });
 
 $("#logout").addEventListener("click", async () => {
-  const session = readSession();
-  try {
-    await rawFetch("/api/logout", {
-      method: "POST", headers: { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
-      body: JSON.stringify({})
-    });
-  } catch {}
-  clearSession();
+  if (supabaseClient) await supabaseClient.auth.signOut();
+  currentUser = null;
   showLogin("Anda sudah keluar.");
 });
 
-$("#video").addEventListener("change", (e) => selectFile(e.target.files[0]));
+$("#video").addEventListener("change", (event) => selectFile(event.target.files?.[0]));
 const drop = $("#drop");
-["dragenter", "dragover"].forEach((eventName) => drop.addEventListener(eventName, (e) => { e.preventDefault(); drop.classList.add("drag"); }));
-["dragleave", "drop"].forEach((eventName) => drop.addEventListener(eventName, (e) => { e.preventDefault(); drop.classList.remove("drag"); }));
-drop.addEventListener("drop", (e) => selectFile(e.dataTransfer.files[0]));
-function selectFile(f) {
-  if (!f) return;
-  if (!f.type.startsWith("video/")) return fail("File harus berupa video.");
-  if (f.size > 200 * 1024 * 1024) return fail("Ukuran video maksimal 200 MB.");
-  file = f;
-  $("#fileTitle").textContent = f.name;
-  $("#fileMeta").textContent = `${(f.size / 1024 / 1024).toFixed(1)} MB · siap diproses`;
+["dragenter", "dragover"].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); drop.classList.add("drag"); }));
+["dragleave", "drop"].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); drop.classList.remove("drag"); }));
+drop.addEventListener("drop", (event) => selectFile(event.dataTransfer.files?.[0]));
+function selectFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith("video/")) return fail("File harus berupa video.");
+  if (file.size > 100 * 1024 * 1024) return fail("Ukuran video maksimal 100 MB pada bucket Supabase saat ini.");
+  selectedFile = file;
+  $("#fileTitle").textContent = file.name;
+  $("#fileMeta").textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · siap diunggah ke Supabase`;
   $("#start").disabled = false;
   show("#templates");
   show("#error", false);
   show("#result", false);
 }
-function fail(message) { $("#error").textContent = message; show("#error"); $("#start").disabled = true; }
 
 $("#start").addEventListener("click", async () => {
-  if (!file) return;
+  if (!selectedFile || !currentUser || !supabaseClient) return;
   $("#start").disabled = true;
   show("#result", false);
   show("#error", false);
   show("#status");
-  setStatus("Mengunggah video", "Video sedang dikirim ke server…");
-  const started = Date.now();
-  timer = setInterval(() => $("#elapsed").textContent = `${Math.floor((Date.now() - started) / 1000)} detik`, 1000);
+  setStatus("Mengunggah video ke Supabase", "Video disimpan di bucket privat akun Anda…");
+  startedAt = Date.now();
+  elapsedTimer = setInterval(() => { $("#elapsed").textContent = `${Math.floor((Date.now() - startedAt) / 1000)} detik`; }, 1000);
+  const jobId = crypto.randomUUID();
+  const ext = (selectedFile.name.split(".").pop() || "mp4").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "mp4";
+  const storagePath = `${currentUser.id}/${jobId}/input.${ext}`;
   try {
-    const form = new FormData();
-    form.append("video", file);
-    form.append("template", document.querySelector('input[name="template"]:checked')?.value || "clean");
-    form.append("language", $("#language").value);
-    form.append("format", $("#format").value);
-    const response = await fetch("/api/video/jobs", { method: "POST", body: form });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Gagal mengunggah video.");
-    job = data.jobId;
-    poll();
-  } catch (error) { doneError(error.message); }
+    const { error: uploadError } = await supabaseClient.storage.from("video-jobs").upload(storagePath, selectedFile, {
+      contentType: selectedFile.type || "video/mp4",
+      cacheControl: "3600",
+      upsert: false
+    });
+    if (uploadError) throw uploadError;
+    const { error: insertError } = await supabaseClient.from("video_jobs").insert({
+      id: jobId,
+      user_id: currentUser.id,
+      status: "queued",
+      original_filename: selectedFile.name,
+      template: document.querySelector('input[name="template"]:checked')?.value || "clean",
+      target_language: $("#language").value,
+      format: $("#format").value,
+      output_mode: "burned",
+      input_path: storagePath,
+      source_provider: "upload"
+    });
+    if (insertError) {
+      await supabaseClient.storage.from("video-jobs").remove([storagePath]);
+      throw insertError;
+    }
+    activeJobId = jobId;
+    setStatus("Video masuk antrean Supabase", "Halaman ini akan memantau status job secara otomatis.");
+    pollJob();
+  } catch (error) {
+    doneError(error.message || "Gagal mengunggah video ke Supabase.");
+  }
 });
 
 document.querySelectorAll(".template input").forEach((input) => input.addEventListener("change", () => {
@@ -199,47 +157,64 @@ document.querySelectorAll(".template input").forEach((input) => input.addEventLi
   input.closest(".template").classList.add("selected");
 }));
 
-async function poll() {
+async function pollJob() {
+  if (!activeJobId || !currentUser || !supabaseClient) return;
   try {
-    const response = await fetch(`/api/video/jobs/${job}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Status tidak tersedia.");
+    const { data, error } = await supabaseClient.from("video_jobs")
+      .select("id,status,output_path,subtitle_path,segments,title,description,hashtags,error,target_language,format")
+      .eq("id", activeJobId).single();
+    if (error) throw error;
     const labels = {
-      queued: ["Dalam antrean", "Video menunggu diproses…"],
-      extracting: ["Membaca audio", "Memisahkan narasi dari video…"],
-      translating: ["Menerjemahkan narasi", "AI membuat subtitle dan metadata…"],
-      rendering: ["Menyusun video", "Subtitle sedang ditempelkan langsung ke video…"]
+      queued: ["Dalam antrean", "Video tersimpan di Supabase dan menunggu worker GitHub Actions…"],
+      extracting: ["Membaca audio", "Worker sedang memisahkan narasi dari video…"],
+      transcribing: ["Membaca narasi", "Worker sedang membuat transkrip…"],
+      translating: ["Menerjemahkan narasi", "AI sedang membuat subtitle dan metadata…"],
+      rendering: ["Menyusun video", "Subtitle sedang ditempelkan ke video…"]
     };
-    if (labels[data.status]) setStatus(...labels[data.status]);
-    if (data.status === "completed") {
-      clearInterval(timer);
-      show("#status", false);
-      show("#result");
-      $("#download").href = data.result.video;
-      $("#resultMeta").textContent = `${data.result.segments} segmen · subtitle tertanam · ${data.result.targetLanguage}`;
-      $("#socialTitle").value = data.result.title || "";
-      $("#socialDescription").value = data.result.description || "";
-      $("#socialHashtags").value = (data.result.hashtags || []).join(" ");
+    if (labels[data.status]) {
+      setStatus(...labels[data.status]);
+      pollTimer = setTimeout(pollJob, 5000);
       return;
     }
     if (data.status === "failed") return doneError(data.error || "Pemrosesan video gagal.");
-    setTimeout(poll, 1500);
-  } catch (error) { doneError(error.message); }
+    if (data.status === "completed") {
+      clearInterval(elapsedTimer);
+      show("#status", false);
+      show("#result");
+      const { data: signed, error: signedError } = await supabaseClient.storage.from("video-jobs").createSignedUrl(data.output_path, 3600);
+      if (signedError) throw signedError;
+      $("#download").href = signed.signedUrl;
+      $("#resultMeta").textContent = `${data.segments || 0} segmen · subtitle tertanam · ${data.target_language || "id"}`;
+      $("#socialTitle").value = data.title || "Video terbaru";
+      $("#socialDescription").value = data.description || "";
+      $("#socialHashtags").value = Array.isArray(data.hashtags) ? data.hashtags.join(" ") : "";
+      return;
+    }
+    pollTimer = setTimeout(pollJob, 5000);
+  } catch (error) {
+    doneError(error.message || "Tidak dapat membaca status job.");
+  }
+}
+function fail(message) {
+  $("#error").textContent = message;
+  show("#error");
+  $("#start").disabled = true;
 }
 function doneError(message) {
-  clearInterval(timer);
+  clearTimeout(pollTimer);
+  clearInterval(elapsedTimer);
   show("#status", false);
-  show("#error");
   $("#error").textContent = message;
+  show("#error");
   $("#start").disabled = false;
 }
 $("#reset").addEventListener("click", () => location.reload());
 document.querySelectorAll("[data-copy]").forEach((button) => button.addEventListener("click", async () => {
   const element = document.getElementById(button.dataset.copy);
-  await navigator.clipboard.writeText(element.value);
-  const oldText = button.textContent;
-  button.textContent = "Tersalin";
-  setTimeout(() => button.textContent = oldText, 1200);
+  try {
+    await navigator.clipboard.writeText(element.value);
+    const oldText = button.textContent;
+    button.textContent = "Tersalin";
+    setTimeout(() => { button.textContent = oldText; }, 1500);
+  } catch { element.select(); document.execCommand("copy"); }
 }));
-
-initAuth();

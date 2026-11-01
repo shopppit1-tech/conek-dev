@@ -8,7 +8,7 @@
   <link rel="manifest" href="./manifest.json">
   <link rel="icon" href="./icons/icon-192.png" type="image/png">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <section id="authScreen" class="auth-screen hidden" aria-labelledby="authTitle">
@@ -48,7 +48,9 @@
     <section class="steps"><div><b>1</b><span>Unggah video</span></div><div><b>2</b><span>Pilih template</span></div><div><b>3</b><span>Terjemahkan</span></div><div><b>4</b><span>Unduh video</span></div></section>
     <footer>Audio asli tetap dipertahankan. Hasil akhir berupa satu video MP4 dengan subtitle Indonesia.</footer>
   </main>
-  <script src="/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="./supabase-config.js"></script>
+  <script src="./app.js"></script>
   <script>if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(()=>{}));</script>
 </body>
 </html>

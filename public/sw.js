@@ -1,9 +1,10 @@
-const CACHE_NAME = "video-translate-shell-v2";
+const CACHE_NAME = "video-translate-shell-v3";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
   "./style.css",
   "./app.js",
+  "./supabase-config.js",
   "./manifest.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
