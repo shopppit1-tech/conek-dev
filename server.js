@@ -20,7 +20,14 @@ const sessions = new Map();
 const videoJobs = new Map();
 const videoOutputDir = path.join(os.tmpdir(), "devops-video-output");
 fs.mkdirSync(videoOutputDir, {recursive:true});
-const videoUpload = multer({storage:multer.memoryStorage(),limits:{fileSize:200*1024*1024},fileFilter:(req,file,cb)=>cb(null,/^video\//i.test(file.mimetype))});
+const videoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, os.tmpdir()),
+    filename: (req, file, cb) => cb(null, `devops-upload-${crypto.randomBytes(8).toString("hex")}${path.extname(file.originalname || ".mp4") || ".mp4"}`)
+  }),
+  limits: {fileSize: 100 * 1024 * 1024},
+  fileFilter: (req, file, cb) => cb(null, /^video\//i.test(file.mimetype))
+});
 
 function auth(req, res, next) {
   if (!APP_PASSWORD) return next();
@@ -40,7 +47,7 @@ app.use("/api", (req,res,next)=>{ if(req.path==="/login"||req.path==="/health") 
 const providers = {
   openai: { key:()=>process.env.OPENAI_API_KEY || (process.env.AI_PROVIDER==="openai"?process.env.AI_API_KEY:""), model:()=>process.env.OPENAI_MODEL || process.env.AI_MODEL || "gpt-4o-mini", base:()=>"https://api.openai.com/v1/chat/completions" },
   anthropic: { key:()=>process.env.ANTHROPIC_API_KEY || (process.env.AI_PROVIDER==="anthropic"?process.env.AI_API_KEY:""), model:()=>process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest" },
-  gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-3.8-flash" },
+  gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-2.5-flash" },
   compatible: { key:()=>process.env.COMPAT_API_KEY || (process.env.AI_PROVIDER==="openai-compatible"?process.env.AI_API_KEY:""), model:()=>process.env.COMPAT_MODEL || process.env.AI_MODEL || "default", base:()=>process.env.COMPAT_BASE_URL || process.env.AI_BASE_URL },
   manus: { key:()=>process.env.MANUS_API_KEY || (process.env.AI_PROVIDER==="manus"?process.env.AI_API_KEY:""), model:()=>process.env.MANUS_MODEL || process.env.AI_MODEL || "manus-1.6-lite", base:()=>process.env.MANUS_BASE_URL || "https://api.manus.ai/v2" }
 };
@@ -63,6 +70,20 @@ function manusText(data){
     return [];
   }).filter(Boolean).join("\n");
 }
+async function fetchWithTimeout(url, options={}, timeoutMs=90000){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try { return await fetch(url, {...options, signal: controller.signal}); }
+  catch (e) { if (e.name === "AbortError") throw Object.assign(new Error("AI timeout setelah " + Math.round(timeoutMs / 1000) + " detik"), {status: 504}); throw e; }
+  finally { clearTimeout(timer); }
+}
+function parseJsonAI(text){
+  const cleaned = String(text || "").replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+  try { return JSON.parse(cleaned); } catch {}
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) return JSON.parse(match[0]);
+  throw Error("AI tidak mengembalikan JSON valid.");
+}
 async function callProvider(name, messages){
   const p=providers[name]; const key=p.key();
   if(!key) throw Object.assign(new Error("API key "+name+" belum diatur"),{status:401,provider:name});
@@ -70,7 +91,7 @@ async function callProvider(name, messages){
   if(name==="manus"){
     const prompt=[system,...messages.filter(m=>m.role!=="system").map(m=>`${m.role}: ${m.content}`)].join("\n\n");
     const profile=p.model().includes("max")?"max":p.model().includes("lite")?"lite":"standard";
-    const r=await fetch(p.base().replace(/\/$/,"")+"/task.create",{method:"POST",headers:{"content-type":"application/json","x-manus-api-key":key},body:JSON.stringify({message:{content:[{type:"text",text:prompt}]},agent_profile:profile})});
+    const r=await fetchWithTimeout(p.base().replace(/\/$/,"")+"/task.create",{method:"POST",headers:{"content-type":"application/json","x-manus-api-key":key},body:JSON.stringify({message:{content:[{type:"text",text:prompt}]},agent_profile:profile})});
     const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||data.error?.code||data.message||`Manus API HTTP ${r.status}`),{status:r.status,provider:name});
     let result=data; let text=manusText(result); const taskId=data.task_id||data.taskId||data.task?.id;
     if(!text && taskId){
@@ -78,7 +99,7 @@ async function callProvider(name, messages){
       const deadline=Date.now()+55000;
       while(Date.now()<deadline){
         await new Promise(resolve=>setTimeout(resolve,1500));
-        const poll=await fetch(taskUrl,{headers:{"Accept":"application/json","x-manus-api-key":key}}); result=await poll.json();
+        const poll=await fetchWithTimeout(taskUrl,{headers:{"Accept":"application/json","x-manus-api-key":key}}); result=await poll.json();
         if(!poll.ok) throw Object.assign(new Error(result.error?.message||result.error?.code||result.message||`Manus task retrieval HTTP ${poll.status}`),{status:poll.status,provider:name});
         const assistantMessages=(result.messages||[]).filter(x=>x?.type==="assistant_message"&&x.assistant_message?.content).map(x=>x.assistant_message.content);
         text=assistantMessages.join("\n"); const statusUpdates=(result.messages||[]).filter(x=>x?.type==="status_update").map(x=>x.status_update?.agent_status); const status=String(statusUpdates[0]||"").toLowerCase();
@@ -90,21 +111,21 @@ async function callProvider(name, messages){
     return {text,provider:name,model:p.model()};
   }
   if(name==="anthropic"){
-    const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:p.model(),max_tokens:1200,system,messages:messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}))})});
+    const r=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:p.model(),max_tokens:1200,system,messages:messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}))})});
     const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||"Anthropic API error"),{status:r.status,provider:name});
     return {text:(data.content||[]).map(x=>x.text||"").join("\n"),provider:name,model:p.model()};
   }
   if(name==="gemini"){
     const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(p.model())}:generateContent?key=${encodeURIComponent(key)}`;
     const contents=messages.filter(m=>m.role!=="system").map(m=>({role:m.role==="assistant"?"model":"user",parts:[{text:m.content}]}));
-    const r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({systemInstruction:{parts:[{text:system}]},contents,generationConfig:{maxOutputTokens:1200}})});
+    const r=await fetchWithTimeout(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({systemInstruction:{parts:[{text:system}]},contents,generationConfig:{maxOutputTokens:1200}})});
     const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||"Gemini API error"),{status:r.status,provider:name});
     return {text:(data.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("\n"),provider:name,model:p.model()};
   }
   const base=name==="openai"?p.base():p.base();
   if(!base) throw Object.assign(new Error("AI_BASE_URL/COMPAT_BASE_URL belum diatur"),{status:400,provider:name});
   const url=base.endsWith("/chat/completions")?base:base.replace(/\/$/,"")+"/chat/completions";
-  const r=await fetch(url,{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+key},body:JSON.stringify({model:p.model(),messages:[{role:"system",content:system},...messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}))],temperature:0.3})});
+  const r=await fetchWithTimeout(url,{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+key},body:JSON.stringify({model:p.model(),messages:[{role:"system",content:system},...messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}))],temperature:0.3})});
   const data=await r.json(); if(!r.ok) throw Object.assign(new Error(data.error?.message||"AI API error"),{status:r.status,provider:name});
   return {text:data.choices?.[0]?.message?.content||"Provider tidak mengembalikan jawaban.",provider:name,model:p.model()};
 }
@@ -167,16 +188,34 @@ app.post("/api/firebase/deploy",auth,async(req,res)=>{
 });
 function videoTime(sec){const ms=Math.max(0,Math.round(Number(sec||0)*1000)),h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000),s=Math.floor(ms%60000/1000),z=ms%1000;return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")},${String(z).padStart(3,"0")}`;}
 function srtFromSegments(segments){return segments.map((x,i)=>`${i+1}\n${videoTime(x.start)} --> ${videoTime(Math.max(Number(x.end||0),Number(x.start||0)+1))}\n${String(x.translation||x.text||"").trim()}\n`).join("\n");}
-async function transcribeAudio(audioPath){const python=process.env.WHISPER_PYTHON||"python3";try{const {stdout}=await execFileAsync(python,[path.join(__dirname,"transcribe.py"),audioPath],{timeout:900000,maxBuffer:20*1024*1024});const result=JSON.parse(stdout);if(!Array.isArray(result.segments)||!result.segments.length)throw Error("Narasi tidak terdeteksi di video.");return result;}catch(e){throw Error(`Whisper gagal membaca suara: ${(e.stderr||e.message||"").slice(-1200)}`);}}
+async function transcribeAudio(audioPath){
+  const python=process.env.WHISPER_PYTHON||"python3";
+  try{const {stdout}=await execFileAsync(python,[path.join(__dirname,"transcribe.py"),audioPath],{timeout:900000,maxBuffer:20*1024*1024});const result=JSON.parse(stdout);if(!Array.isArray(result.segments)||!result.segments.length)throw Error("Narasi tidak terdeteksi di video.");return result;}
+  catch(e){throw Error(`Whisper gagal membaca suara: ${(e.stderr||e.message||"").slice(-1200)}`);}
+}
 async function transcribeWithManus(audioPath){const p=providers.manus,key=p.key();if(!key)throw Error("MANUS_API_KEY belum dikonfigurasi untuk transkripsi audio.");const data=fs.readFileSync(audioPath).toString("base64"),prompt=`Transkripsikan seluruh narasi dari audio ini dengan timestamp. Kembalikan JSON valid saja dengan bentuk {"segments":[{"start":0,"end":3,"text":"teks asli"}]}. Jangan menerjemahkan dan jangan menambahkan penjelasan.`,base=p.base().replace(/\/$/,"");const r=await fetch(base+"/task.create",{method:"POST",headers:{"content-type":"application/json","x-manus-api-key":key},body:JSON.stringify({message:{content:[{type:"text",text:prompt},{type:"voice",file_data:`data:audio/mpeg;base64,${data}`,filename:"video-audio.mp3",mime_type:"audio/mpeg",visibility:"visible"}]},agent_profile:"lite",locale:"id"})}),created=await r.json();if(!r.ok)throw Error(created.error?.message||created.message||`Manus audio HTTP ${r.status}`);let result=created,text=manusText(result),taskId=created.task_id||created.taskId||created.task?.id;if(!text&&taskId){const deadline=Date.now()+90000;while(Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,2000));const poll=await fetch(base+"/task.listMessages?task_id="+encodeURIComponent(taskId)+"&order=desc&limit=30",{headers:{Accept:"application/json","x-manus-api-key":key}});result=await poll.json();const messages=result.messages||[];const assistant=messages.filter(x=>x?.type==="assistant_message"&&x.assistant_message?.content).flatMap(x=>{const c=x.assistant_message.content;if(typeof c==="string")return [c];if(Array.isArray(c))return c.map(y=>y?.text||y?.value||"");return [c?.text||c?.value||""];}).filter(Boolean);text=assistant.join("\n");if(text)break;}}if(!text)throw Error("Manus belum mengembalikan transkripsi audio.");const parsed=JSON.parse(text.replace(/^```json\s*|\s*```$/g,"").trim());if(!Array.isArray(parsed.segments)||!parsed.segments.length)throw Error("Manus tidak menemukan narasi.");return parsed;}
 async function transcribeWithGemini(audioPath){const key=process.env.GEMINI_API_KEY;if(!key)throw Error("GEMINI_API_KEY belum dikonfigurasi untuk transkripsi cadangan.");const audio=fs.readFileSync(audioPath).toString("base64"),prompt=`Dengarkan audio ini dan buat transkripsi narasi ber-timestamp. Kembalikan JSON valid saja dengan bentuk {"segments":[{"start":0,"end":3,"text":"teks asli"}]}. Jangan menambahkan penjelasan.`,models=[process.env.GEMINI_AUDIO_MODEL,"gemini-2.5-flash-lite","gemini-2.5-flash",process.env.GEMINI_MODEL].filter((x,i,a)=>x&&a.indexOf(x)===i);let lastError;for(const model of models){try{const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt},{inlineData:{mimeType:"audio/mpeg",data:audio}}]}],generationConfig:{responseMimeType:"application/json",temperature:0.1}})}),d=await r.json();if(!r.ok)throw Error(d.error?.message||`Gemini audio HTTP ${r.status}`);const text=(d.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("").replace(/^```json\s*|\s*```$/g,"").trim(),parsed=JSON.parse(text);if(Array.isArray(parsed.segments)&&parsed.segments.length)return parsed;}catch(e){lastError=e;}}throw lastError||Error("Transkripsi audio gagal.");}
-async function translateTranscript(transcript,targetLanguage="id"){const key=process.env.GEMINI_API_KEY;if(!key)throw Error("GEMINI_API_KEY belum dikonfigurasi untuk terjemahan teks.");const language=targetLanguage==="en"?"English":targetLanguage==="auto"?"bahasa yang paling sesuai setelah mendeteksi bahasa narasi":"Bahasa Indonesia",prompt=`Terjemahkan subtitle berikut ke ${language}. Buat juga judul singkat, deskripsi media sosial yang natural, dan 5 hashtag relevan. Pertahankan start dan end persis. Kembalikan JSON valid saja dengan bentuk {"segments":[{"start":0,"end":3,"text":"teks asli","translation":"hasil terjemahan"}],"title":"judul","description":"deskripsi","hashtags":["#satu"]}. SUBTITLE ASLI: ${JSON.stringify(transcript.segments)}`,models=[process.env.GEMINI_TEXT_MODEL,"gemini-2.5-flash-lite","gemini-2.5-flash",process.env.GEMINI_MODEL].filter((x,i,a)=>x&&a.indexOf(x)===i);let lastError;for(const model of models){try{const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json",temperature:0.2}})}),d=await r.json();if(!r.ok)throw Error(d.error?.message||`Gemini text HTTP ${r.status}`);const text=(d.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("").replace(/^```json\s*|\s*```$/g,"").trim(),parsed=JSON.parse(text);if(!Array.isArray(parsed.segments)||!parsed.segments.length)throw Error("Terjemahan subtitle kosong.");return parsed;}catch(e){lastError=e;}}if(providers.manus.key()){try{const result=await callProvider("manus",[{role:"user",content:prompt+"\nKembalikan JSON valid saja tanpa markdown."}]);const text=result.text.replace(/^```json\s*|\s*```$/g,"").trim(),parsed=JSON.parse(text);if(Array.isArray(parsed.segments)&&parsed.segments.length)return parsed;}catch(e){lastError=e;}}throw lastError||Error("Semua model terjemahan teks gagal.");}
-
+async function translateTranscript(transcript,targetLanguage="id"){
+  const language=targetLanguage==="en"?"English":targetLanguage==="auto"?"bahasa yang paling sesuai setelah mendeteksi bahasa narasi":"Bahasa Indonesia";
+  const prompt=`Terjemahkan subtitle berikut ke ${language}. Buat juga judul singkat, deskripsi media sosial natural, dan 5 hashtag relevan. Pertahankan start dan end persis. Kembalikan JSON valid saja dengan bentuk {"segments":[{"start":0,"end":3,"text":"teks asli","translation":"hasil terjemahan"}],"title":"judul","description":"deskripsi","hashtags":["#satu"]}. SUBTITLE ASLI: ${JSON.stringify(transcript.segments)}`;
+  const order=configuredOrder(); let lastError;
+  for(const name of order){
+    try{const result=await callProvider(name,[{role:"user",content:prompt+"\nKembalikan JSON valid saja tanpa markdown."}]);const parsed=parseJsonAI(result.text);if(Array.isArray(parsed.segments)&&parsed.segments.length)return parsed;throw Error("Terjemahan subtitle kosong.");}
+    catch(e){lastError=e;}
+  }
+  throw lastError||Error("Tidak ada provider AI yang tersedia untuk terjemahan subtitle.");
+}
 const subtitleStyles={clean:"FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=28",bold:"FontName=Arial,FontSize=24,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=3,Shadow=1,MarginV=34",neon:"FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&H00FFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=2,Shadow=1,MarginV=32",cinema:"FontName=Georgia,FontSize=21,Bold=1,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=30",pink:"FontName=Arial,FontSize=21,Bold=1,PrimaryColour=&H00FFAAFF,OutlineColour=&H001B0617,BorderStyle=1,Outline=2,Shadow=1,MarginV=31",green:"FontName=Arial,FontSize=21,Bold=1,PrimaryColour=&H0000FFAA,OutlineColour=&H000B1A14,BorderStyle=1,Outline=2,Shadow=1,MarginV=31"};
 const videoFormats={short:{label:"Short / Reels · 9:16",width:1080,height:1920},square:{label:"Square · 1:1",width:1080,height:1080},feed:{label:"Feed · 4:5",width:1080,height:1350},landscape:{label:"Landscape · 16:9",width:1920,height:1080}};
-async function processVideoJob(jobId,inputPath,template="clean",targetLanguage="id",format="short",outputMode="original"){const work=path.join(os.tmpdir(),`devops-video-${jobId}`);fs.mkdirSync(work,{recursive:true});const audioPath=path.join(work,"audio.mp3"),srtPath=path.join(videoOutputDir,`${jobId}.srt`),outputPath=path.join(videoOutputDir,`${jobId}-${format}-video.mp4`);try{videoJobs.get(jobId).status="extracting";await execFileAsync(ffmpegPath,["-y","-i",inputPath,"-vn","-ac","1","-ar","16000","-b:a","64k",audioPath],{timeout:300000});videoJobs.get(jobId).status="translating";let transcript;try{transcript=await transcribeAudio(audioPath);}catch(whisperError){try{transcript=await transcribeWithManus(audioPath);}catch(manusError){try{transcript=await transcribeWithGemini(audioPath);}catch(geminiError){throw Error(`Transkripsi Manus dan Gemini gagal. Manus: ${manusError.message||manusError}; Gemini: ${geminiError.message||geminiError}`);}}}videoJobs.get(jobId).status="translating";const analysis=await translateTranscript(transcript,targetLanguage),segments=analysis.segments;fs.writeFileSync(srtPath,srtFromSegments(segments));if(outputMode==="burned"){videoJobs.get(jobId).status="rendering";const style=subtitleStyles[template]||subtitleStyles.clean,size=videoFormats[format]||videoFormats.short,filter=`scale=${size.width}:${size.height}:force_original_aspect_ratio=increase,crop=${size.width}:${size.height},setsar=1,subtitles=${srtPath}:force_style='${style}'`;await execFileAsync(ffmpegPath,["-y","-i",inputPath,"-vf",filter,"-c:a","copy","-c:v","libx264","-preset","veryfast","-crf","23",outputPath],{timeout:900000});}else{fs.copyFileSync(inputPath,outputPath);}videoJobs.get(jobId).status="completed";videoJobs.get(jobId).result={video:`/api/video/jobs/${jobId}/download`,srt:`/api/video/jobs/${jobId}/srt`,segments:segments.length,template,targetLanguage,format,outputMode,title:analysis.title||"Video terbaru",description:analysis.description||"",hashtags:Array.isArray(analysis.hashtags)?analysis.hashtags:[]};}catch(e){videoJobs.get(jobId).status="failed";videoJobs.get(jobId).error=(e.stderr||e.message||"Pemrosesan video gagal").slice(-2000);}finally{try{fs.rmSync(inputPath,{force:true});fs.rmSync(work,{recursive:true,force:true});}catch{}}}
-app.post("/api/video/jobs",auth,(req,res)=>videoUpload.single("video")(req,res,async err=>{if(err)return res.status(400).json({error:err.message});if(!req.file)return res.status(400).json({error:"Unggah file video terlebih dahulu."});const id=crypto.randomBytes(8).toString("hex"),inputPath=path.join(os.tmpdir(),`devops-upload-${id}-${path.extname(req.file.originalname)||".mp4"}`),template=String(req.body?.template||"clean"),targetLanguage=["id","en","auto"].includes(req.body?.language)?req.body.language:"id",format=Object.hasOwn(videoFormats,req.body?.format)?req.body.format:"short",outputMode="burned";fs.writeFileSync(inputPath,req.file.buffer);videoJobs.set(id,{status:"queued",createdAt:Date.now(),name:req.file.originalname,template,targetLanguage,format,outputMode});res.status(202).json({jobId:id,status:"queued",message:"Video diterima dan subtitle akan ditempelkan langsung."});processVideoJob(id,inputPath,template,targetLanguage,format,outputMode); }));
+async function processVideoJob(jobId,inputPath,template="clean",targetLanguage="id",format="short",outputMode="original"){const work=path.join(os.tmpdir(),`devops-video-${jobId}`);fs.mkdirSync(work,{recursive:true});const audioPath=path.join(work,"audio.mp3"),srtPath=path.join(videoOutputDir,`${jobId}.srt`),outputPath=path.join(videoOutputDir,`${jobId}-${format}-video.mp4`);try{videoJobs.get(jobId).status="extracting";await execFileAsync(ffmpegPath,["-y","-i",inputPath,"-vn","-ac","1","-ar","16000","-b:a","64k",audioPath],{timeout:300000});videoJobs.get(jobId).status="translating";let transcript,lastError;
+  const transcriptionSteps=[];
+  if(process.env.MANUS_API_KEY) transcriptionSteps.push(()=>transcribeWithManus(audioPath));
+  if(process.env.GEMINI_API_KEY) transcriptionSteps.push(()=>transcribeWithGemini(audioPath));
+  if(process.env.ENABLE_LOCAL_WHISPER==="true") transcriptionSteps.push(()=>transcribeAudio(audioPath));
+  for(const step of transcriptionSteps){try{transcript=await step();break;}catch(e){lastError=e;}}
+  if(!transcript) throw Error(lastError?.message||"Transkripsi gagal. Atur MANUS_API_KEY atau GEMINI_API_KEY.");videoJobs.get(jobId).status="translating";const analysis=await translateTranscript(transcript,targetLanguage),segments=analysis.segments;fs.writeFileSync(srtPath,srtFromSegments(segments));if(outputMode==="burned"){videoJobs.get(jobId).status="rendering";const style=subtitleStyles[template]||subtitleStyles.clean,size=videoFormats[format]||videoFormats.short,filter=`scale=${size.width}:${size.height}:force_original_aspect_ratio=increase,crop=${size.width}:${size.height},setsar=1,subtitles=${srtPath}:force_style='${style}'`;await execFileAsync(ffmpegPath,["-y","-i",inputPath,"-vf",filter,"-c:a","copy","-c:v","libx264","-preset","veryfast","-crf","23",outputPath],{timeout:900000});}else{fs.copyFileSync(inputPath,outputPath);}videoJobs.get(jobId).status="completed";videoJobs.get(jobId).result={video:`/api/video/jobs/${jobId}/download`,srt:`/api/video/jobs/${jobId}/srt`,segments:segments.length,template,targetLanguage,format,outputMode,title:analysis.title||"Video terbaru",description:analysis.description||"",hashtags:Array.isArray(analysis.hashtags)?analysis.hashtags:[]};}catch(e){videoJobs.get(jobId).status="failed";videoJobs.get(jobId).error=(e.stderr||e.message||"Pemrosesan video gagal").slice(-2000);}finally{try{fs.rmSync(inputPath,{force:true});fs.rmSync(work,{recursive:true,force:true});}catch{}}}
+app.post("/api/video/jobs",auth,(req,res)=>videoUpload.single("video")(req,res,async err=>{if(err)return res.status(400).json({error:err.message});if(!req.file)return res.status(400).json({error:"Unggah file video terlebih dahulu."});const id=crypto.randomBytes(8).toString("hex"),inputPath=req.file.path,template=String(req.body?.template||"clean"),targetLanguage=["id","en","auto"].includes(req.body?.language)?req.body.language:"id",format=Object.hasOwn(videoFormats,req.body?.format)?req.body.format:"short",outputMode="burned";videoJobs.set(id,{status:"queued",createdAt:Date.now(),name:req.file.originalname,template,targetLanguage,format,outputMode});res.status(202).json({jobId:id,status:"queued",message:"Video diterima dan subtitle akan ditempelkan langsung."});processVideoJob(id,inputPath,template,targetLanguage,format,outputMode); }));
 app.get("/api/video/jobs/:id",auth,(req,res)=>{const job=videoJobs.get(req.params.id);if(!job)return res.status(404).json({error:"Job video tidak ditemukan atau sudah kedaluwarsa."});res.json({jobId:req.params.id,...job});});
-app.get("/api/video/jobs/:id/download",auth,(req,res)=>{const file=path.join(videoOutputDir,`${req.params.id}-id-subtitle.mp4`);if(!fs.existsSync(file))return res.status(404).json({error:"Video belum selesai."});res.download(file,"video-terjemahan-indonesia.mp4");});
-app.get("/api/video/jobs/:id/srt",auth,(req,res)=>{const file=path.join(os.tmpdir(),`devops-video-${req.params.id}`,"translated-id.srt");if(!fs.existsSync(file))return res.status(404).json({error:"Subtitle belum tersedia."});res.download(file,"subtitle-indonesia.srt");});
+app.get("/api/video/jobs/:id/download",auth,(req,res)=>{const job=videoJobs.get(req.params.id);const format=job?.format||"short";const file=path.join(videoOutputDir,`${req.params.id}-${format}-video.mp4`);if(!fs.existsSync(file))return res.status(404).json({error:"Video belum selesai."});res.download(file,"video-terjemahan-indonesia.mp4");});
+app.get("/api/video/jobs/:id/srt",auth,(req,res)=>{const file=path.join(videoOutputDir,`${req.params.id}.srt`);if(!fs.existsSync(file))return res.status(404).json({error:"Subtitle belum tersedia."});res.download(file,"subtitle-indonesia.srt");});
 app.listen(PORT,()=>console.log(`DevOps AI berjalan di port ${PORT}`));
