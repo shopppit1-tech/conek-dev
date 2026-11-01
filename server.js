@@ -47,7 +47,7 @@ app.use("/api", (req,res,next)=>{ if(req.path==="/login"||req.path==="/health") 
 const providers = {
   openai: { key:()=>process.env.OPENAI_API_KEY || (process.env.AI_PROVIDER==="openai"?process.env.AI_API_KEY:""), model:()=>process.env.OPENAI_MODEL || process.env.AI_MODEL || "gpt-4o-mini", base:()=>"https://api.openai.com/v1/chat/completions" },
   anthropic: { key:()=>process.env.ANTHROPIC_API_KEY || (process.env.AI_PROVIDER==="anthropic"?process.env.AI_API_KEY:""), model:()=>process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest" },
-  gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-2.5-flash" },
+  gemini: { key:()=>process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER==="gemini"?process.env.AI_API_KEY:""), model:()=>process.env.GEMINI_MODEL || "gemini-3.8-flash" },
   compatible: { key:()=>process.env.COMPAT_API_KEY || (process.env.AI_PROVIDER==="openai-compatible"?process.env.AI_API_KEY:""), model:()=>process.env.COMPAT_MODEL || process.env.AI_MODEL || "default", base:()=>process.env.COMPAT_BASE_URL || process.env.AI_BASE_URL },
   manus: { key:()=>process.env.MANUS_API_KEY || (process.env.AI_PROVIDER==="manus"?process.env.AI_API_KEY:""), model:()=>process.env.MANUS_MODEL || process.env.AI_MODEL || "manus-1.6-lite", base:()=>process.env.MANUS_BASE_URL || "https://api.manus.ai/v2" }
 };
